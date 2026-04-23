@@ -1,0 +1,17 @@
+{
+  "model": {
+    "teacher_hidden": 1024,
+    "student_hidden": 256,
+    "dropout": 0.2
+  },
+  "training": {
+    "num_epochs": 40,
+    "batch_size": 64,
+    "lr": 0.0003,
+    "weight_decay": 0.0001,
+    "alpha": 0.5,
+    "temperature": 2.0,
+    "teacher_loss_weight": 0.5,
+    "seed": 42
+  }
+}

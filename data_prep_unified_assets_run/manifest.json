@@ -1,0 +1,19 @@
+{
+  "schema_version": "data_prep_unified/v1",
+  "pipeline": "assets",
+  "created_at_utc": "2026-04-21T07:26:56Z",
+  "host_platform": "Linux 5.15.0-151-generic",
+  "command": "bash 00_prepare_assets.sh --env evo2",
+  "output_dir": "/mnt/netdisk2/evo2_explore/temp/nju-china-main-dev-0421/data_prep_unified_assets_run",
+  "outputs": [],
+  "input_files": [],
+  "params": {
+    "pipeline": "assets",
+    "env": "evo2",
+    "download_models": null
+  },
+  "status": "success",
+  "return_code": 0,
+  "duration_sec": 7.390975952148438e-05,
+  "adapter_target": "00_prepare_assets.sh"
+}

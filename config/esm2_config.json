@@ -1,0 +1,16 @@
+{
+    "model": {
+        "input_dim": 1280,
+        "ffn_dim": 6480,
+        "num_heads": 8,
+        "num_layers": 4,
+        "dropout": 0.1
+    },
+    "training": {
+        "batch_size": 16,
+        "num_epochs": 64,
+        "lr": 1e-7,
+        "weight_decay": 0.01,
+        "clip_grad": 1.0
+    }
+}
