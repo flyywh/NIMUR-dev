@@ -1,5 +1,8 @@
 # NIMUR
 
+
+<img src="images/nimur.png" alt="index" width="400">
+
 **NIMUR (Neural Integrated Multi-Representation)** is a multi-modal deep learning framework for **biosynthetic gene cluster (BGC) prediction**.  
 It integrates **protein embeddings**, **DNA embeddings**, and **knowledge-graph modeling** for **6-class BGC classification**, genome-scale scanning, and efficient downstream deployment.
 
