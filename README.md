@@ -47,11 +47,11 @@ KG Triples ────────> ORACLE KG
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/nimrod.git
-cd nimrod
+git clone https://github.com/your-org/nimur.git
+cd nimur
 
-conda create -n nimrod python=3.10 -y
-conda activate nimrod
+conda create -n nimur python=3.10 -y
+conda activate nimur
 
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install fair-esm
@@ -85,7 +85,7 @@ python scripts/data_prep/build_esm_protbert_dataset.py \
 ```bash
 bash scripts/pipeline/pipeline.sh \
     --target kd-full \
-    --env nimrod \
+    --env nimur \
     --gpus 0,1 \
     --train-pos data/train_pos.fasta \
     --train-neg data/train_neg.fasta \
@@ -148,7 +148,7 @@ TBD
 ## Project Structure
 
 ```text
-nimrod/
+nimur/
 ├── scripts/
 ├── utils/
 ├── predict/
