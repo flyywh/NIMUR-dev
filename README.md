@@ -47,7 +47,7 @@ KG Triples ────────> ORACLE KG
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/nimur.git
+git clone https://github.com/flyywh/nimur.git
 cd nimur
 
 conda create -n nimur python=3.10 -y
