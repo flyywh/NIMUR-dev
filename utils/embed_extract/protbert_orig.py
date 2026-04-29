@@ -8,7 +8,7 @@ from transformers import AutoModel, AutoTokenizer
 class ProtBERTEmbedder:
     def __init__(self, model_path: str | Path, device: str | torch.device | None = None):
         self.device = torch.device(
-            device if device is not None else "cuda" if torch.cuda.is_available() else "cpu"
+            device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(model_path), local_files_only=True, do_lower_case=False
@@ -37,18 +37,3 @@ class ProtBERTEmbedder:
         pooled = (last * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
         return pooled.mean(dim=0).float().cpu().numpy()
 
-    def encode_matrix(self, seq: str, max_len: int = 1024) -> np.ndarray:
-        """Get per-token ProtBERT embeddings (L, 1024)."""
-        seq = seq.upper().replace(" ", "")
-        if len(seq) > max_len - 2:
-            seq = seq[:max_len - 2]
-        enc = self.tokenizer(
-            seq, add_special_tokens=True, truncation=True, max_length=max_len, return_tensors="pt"
-        )
-        with torch.no_grad():
-            out = self.model(
-                input_ids=enc["input_ids"].to(self.device),
-                attention_mask=enc["attention_mask"].to(self.device),
-            )
-        # Exclude [CLS] and [SEP] tokens
-        return out.last_hidden_state[0, 1:-1, :].float().cpu().numpy()

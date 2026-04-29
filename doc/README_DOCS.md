@@ -171,40 +171,77 @@ python predict/predict.py \
 Best for quick iteration and strong supervised baselines.
 
 ```bash
-python scripts/data_prep/prepare_data.py \
-    --target oracle-cnn \
-    --train-pos data/pos_train.fasta \
-    --train-neg data/neg_train.fasta \
-    --out-dir data/oracle_cnn
+python scripts/data_prep/build_cnn_dataset.py \
+    --train-pos-faa data_ar/mibig_splits/MiBiG_train_pos.fasta \
+    --train-neg-faa data_ar/mibig_splits/MiBiG_train_neg.fasta \
+    --val-pos-faa data_ar/mibig_splits/MiBiG_val_pos.fasta \
+    --val-neg-faa data_ar/mibig_splits/MiBiG_val_neg.fasta \
+    --test-pos-faa data_ar/mibig_splits/MiBiG_test_pos.fasta \
+    --test-neg-faa data_ar/mibig_splits/MiBiG_test_neg.fasta \
+    --split-index data_ar/mibig_splits/MiBiG_split_index.tsv \
+    --cache-dir data/cache_esm_protbert \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --out-dir data/cnn_dataset_multilabel \
+    --device auto
 
-python scripts/trainers/ORACLE_CNN_train.py \
+CUDA_VISIBLE_DEVICES=4 python scripts/trainers/ORACLE_CNN_train.py \
     --config config/oracle_cnn_config.json \
-    --train-dataset data/oracle_cnn/train.pt \
-    --output-dir results/oracle_cnn
+    --train_dataset data/cnn_dataset_multilabel/train \
+    --valid_dataset data/cnn_dataset_multilabel/val \
+    --output_dir results_tune/cnn_multilabel
 ```
 
 ### 2. ORACLE-KG
 Best for modeling structured class relations and type semantics.
 
 ```bash
-python scripts/trainers/ORACLE_train.py \
-    --config config/oracle_config.json \
-    --data-dir data/oracle_kg/ \
-    --output-dir results/oracle_kg
+CUDA_VISIBLE_DEVICES=4 python scripts/data_prep/build_oracle_kg_from_split_index.py \
+    --split-index data_ar/mibig_splits/MiBiG_split_index.tsv \
+    --train-pos-fasta data_ar/mibig_splits/MiBiG_train_pos.fasta \
+    --train-neg-fasta data_ar/mibig_splits/MiBiG_train_neg.fasta \
+    --val-pos-fasta data_ar/mibig_splits/MiBiG_val_pos.fasta \
+    --val-neg-fasta data_ar/mibig_splits/MiBiG_val_neg.fasta \
+    --test-pos-fasta data_ar/mibig_splits/MiBiG_test_pos.fasta \
+    --test-neg-fasta data_ar/mibig_splits/MiBiG_test_neg.fasta \
+    --split-cache-dir data/cache_esm_protbert \
+    --fused-cache-dir data/oracle_kg/fused_cache \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --output-dir data/oracle_kg
+
+CUDA_VISIBLE_DEVICES=4 python scripts/trainers/ORACLE_train.py \
+    --train_dir data/oracle_kg/train \
+    --val_dir data/oracle_kg/val \
+    --embedding_cache_dir data/oracle_kg/fused_cache \
+    --embedding_dim 256 \
+    --batch_size 8 \
+    --eval_batch_size 16 \
+    --epochs 5 \
+    --lr 2e-4 \
+    --weight_decay 0.01 \
+    --output_dir results_tune/oracle_kg_multilabel
 ```
 
 ### 3. KD-Fusion
 Best overall performance and recommended for deployment.
 
 ```bash
-bash scripts/pipeline/pipeline.sh \
-    --target kd-full \
-    --env nimur \
-    --gpus 0,1 \
-    --train-pos data/train_pos.fasta \
-    --train-neg data/train_neg.fasta \
-    --valid-pos data/valid_pos.fasta \
-    --valid-neg data/valid_neg.fasta
+CUDA_VISIBLE_DEVICES=4 python scripts/data_prep/build_esm_protbert_dataset.py \
+    --train-pos-faa data_ar/mibig_splits/MiBiG_train_pos.fasta \
+    --train-neg-faa data_ar/mibig_splits/MiBiG_train_neg.fasta \
+    --val-pos-faa data_ar/mibig_splits/MiBiG_val_pos.fasta \
+    --val-neg-faa data_ar/mibig_splits/MiBiG_val_neg.fasta \
+    --test-pos-faa data_ar/mibig_splits/MiBiG_test_pos.fasta \
+    --test-neg-faa data_ar/mibig_splits/MiBiG_test_neg.fasta \
+    --split-index data_ar/mibig_splits/MiBiG_split_index.tsv \
+    --cache-dir data/cache_esm_protbert \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --out data/kd_fusion/kd_dataset_multilabel.pt \
+    --device auto
+
+CUDA_VISIBLE_DEVICES=4 python scripts/trainers/kd_fusion_train.py \
+    --config config/kd_fusion_config.json \
+    --dataset data/kd_fusion/kd_dataset_multilabel.pt \
+    --outdir results_tune/kd_fusion_multilabel
 ```
 
 ---
@@ -214,24 +251,53 @@ bash scripts/pipeline/pipeline.sh \
 ### Single-sequence prediction
 
 ```bash
-python predict/predict.py \
-    --model results_tune/kd_fusion/run0/models/kd_best.pt \
-    --fasta input/sequences.fasta \
-    --out predictions.csv
+CUDA_VISIBLE_DEVICES=4 python predict/oracle_cnn_predict.py \
+    --config config/oracle_cnn_config.json \
+    --model results_tune/cnn_multilabel/model_epoch_7.pt \
+    --fasta test_real/antismash_test/01_genome/CRBC_G0001.fna \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --out results_tune/cnn_multilabel/fasta_predictions.csv
+
+CUDA_VISIBLE_DEVICES=6,7 python predict/kd_fusion_predict_fasta.py \
+    --model results_tune/kd_fusion_multilabel/models/kd_best.pt \
+    --fasta test_real/antismash_test/01_genome/CRBC_G0001.fna \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --out results_tune/kd_fusion_multilabel/fasta_predictions.csv \
+    --scorer student \
+    --esm-dim 1280 \
+    --prot-dim 1024
+
+CUDA_VISIBLE_DEVICES=4 python predict/oracle_predict.py \
+    --device cuda \
+    --model results_tune/oracle_kg_multilabel/best.pt \
+    --fasta test_real/antismash_test/01_genome/CRBC_G0001.fna \
+    --protbert-path local_assets/data/ProtBERT/ProtBERT \
+    --out results_tune/oracle_kg_multilabel/fasta_rankings.csv \
+    --top-k 5
 ```
 
 ### Genome-wide BGC detection
 
 ```bash
-python predict/kd_genome_detect.py \
-    --model results_tune/kd_fusion/run0/models/kd_best.pt \
-    --genome-fna input/genome.fna \
-    --out-dir results/genome_scan \
-    --threshold 0.55 \
-    --window 12000 \
-    --step 3000 \
-    --merge-gap 1500 \
-    --evo-max-len 16384
+CUDA_VISIBLE_DEVICES=4 python predict/cnn_genome_detect.py \
+    --config config/oracle_cnn_config.json \
+    --model results_tune/cnn_multilabel/model_epoch_7.pt \
+    --genome-fna test_real/antismash_test/01_genome/CRBC_G0001.fna \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --out-dir results_tune/cnn_multilabel/genome_detect_CRBC_G0001
+
+CUDA_VISIBLE_DEVICES=4 python predict/kd_genome_detect.py \
+    --model results_tune/kd_fusion_multilabel/models/kd_best.pt \
+    --genome-fna test_real/antismash_test/01_genome/CRBC_G0001.fna \
+    --protbert local_assets/data/ProtBERT/ProtBERT \
+    --out-dir results_tune/kd_fusion_multilabel/genome_detect_CRBC_G0001
+
+CUDA_VISIBLE_DEVICES=4 python predict/oracle_genome_detect.py \
+    --device cuda \
+    --model results_tune/oracle_kg_multilabel/best.pt \
+    --genome-fna test_real/antismash_test/01_genome/CRBC_G0001.fna \
+    --protbert-path local_assets/data/ProtBERT/ProtBERT \
+    --out-dir results_tune/oracle_kg_multilabel/genome_detect_CRBC_G0001
 ```
 
 **Outputs**

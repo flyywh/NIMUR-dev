@@ -30,12 +30,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--test-pos-faa", required=True)
     p.add_argument("--test-neg-faa", required=True)
     p.add_argument("--protbert", default="local_assets/data/ProtBERT/ProtBERT")
-    p.add_argument("--out", required=True)
+    p.add_argument("--out-dir", required=True)
     p.add_argument("--split-index", default="", help="Optional split_index.tsv for multi-label targets")
     p.add_argument("--cache-dir", default="")
     p.add_argument("--device", default="auto")
-    p.add_argument("--esm-chunk-len", type=int, default=1022)
-    p.add_argument("--protbert-max-len", type=int, default=1024)
+    p.add_argument("--esm-max-len", type=int, default=1022)
+    p.add_argument("--chunk-size", type=int, default=30, help="Chunk size for saving")
+    p.add_argument("--max-seq-len", type=int, default=2400, help="Max sequence length for ProtBERT")
     p.add_argument("--limit-per-file", type=int, default=-1)
     return p.parse_args()
 
@@ -123,7 +124,7 @@ def maybe_empty_cuda_cache(device: str) -> None:
 def main() -> int:
     args = parse_args()
     device = resolve_device(args.device)
-    cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.out).with_suffix("").parent / "cache_esm_protbert"
+    cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.out_dir).with_suffix("").parent / "cache_esm_protbert"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     split_files = {
@@ -155,7 +156,7 @@ def main() -> int:
             esm_features[split_name] = cached
             print(f"[CACHE] reuse {cp}")
             continue
-        feats = encode_split_esm(esm, split_name, ids, seq_map, args.esm_chunk_len)
+        feats = encode_split_esm(esm, split_name, ids, seq_map, args.esm_max_len)
         esm_features[split_name] = feats
         save_cached_features(cp, ids, feats)
     del esm
@@ -173,14 +174,13 @@ def main() -> int:
             prot_features[split_name] = cached
             print(f"[CACHE] reuse {cp}")
             continue
-        feats = encode_split_protbert(prot, split_name, ids, seq_map, args.protbert_max_len)
+        feats = encode_split_protbert(prot, split_name, ids, seq_map, args.max_seq_len)
         prot_features[split_name] = feats
         save_cached_features(cp, ids, feats)
     del prot
     gc.collect()
     maybe_empty_cuda_cache(device)
 
-    payload: dict[str, object] = {}
     meta = {
         "device": device,
         "esm_dim": None,
@@ -189,33 +189,50 @@ def main() -> int:
         "classes": classes,
         "num_classes": (len(classes) if classes is not None else 1),
         "cache_dir": str(cache_dir),
+        "chunk_size": args.chunk_size,
         "source_files": {k: [str(v[0]), str(v[1])] for k, v in split_files.items()},
         "split_index": args.split_index,
     }
 
+    # Save each split in chunks
     for split_name, data in split_data.items():
-        ids = data["ids"]  # type: ignore[index]
-        labels = data["labels"]  # type: ignore[index]
+        ids = data["ids"]
+        labels = data["labels"]
         esm_arr = esm_features[split_name]
         prot_arr = prot_features[split_name]
         fused = np.concatenate([esm_arr, prot_arr], axis=1).astype(np.float32)
-        payload[split_name] = {
-            "X": torch.tensor(fused, dtype=torch.float32),
-            "y": torch.tensor(labels, dtype=torch.float32),
-            "ids": ids,
-        }
+
+        # Create split directory
+        split_dir = Path(args.out_dir) / split_name
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save in chunks
+        for chunk_start in range(0, len(ids), args.chunk_size):
+            chunk_end = min(chunk_start + args.chunk_size, len(ids))
+            chunk_ids = ids[chunk_start:chunk_end]
+            chunk_features = fused[chunk_start:chunk_end]
+            chunk_labels = labels[chunk_start:chunk_end]
+
+            chunk_path = split_dir / f"chunk_{chunk_start:06d}.pt"
+            torch.save({
+                "ids": chunk_ids,
+                "X": torch.tensor(chunk_features, dtype=torch.float32),
+                "y": torch.tensor(chunk_labels, dtype=torch.float32),
+            }, chunk_path)
+
         meta[f"{split_name}_size"] = int(len(ids))
         if meta["esm_dim"] is None:
             meta["esm_dim"] = int(esm_arr.shape[1])
             meta["protbert_dim"] = int(prot_arr.shape[1])
             meta["feature_dim"] = int(fused.shape[1])
 
-    payload["meta"] = meta
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, out)
+    # Save metadata
+    meta_path = Path(args.out_dir) / "metadata.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
     print(json.dumps(meta, ensure_ascii=False, indent=2))
-    print(f"[DONE] saved {out}")
+    print(f"[DONE] saved to {args.out_dir}")
     return 0
 
 

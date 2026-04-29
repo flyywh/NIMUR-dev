@@ -18,13 +18,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from collections import defaultdict
 
-
 # Respect externally provided CUDA_VISIBLE_DEVICES first.
-# os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
 import torch.nn.functional as F
-
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-
 
 
 class ClassifierDataset(Dataset):
@@ -37,32 +33,6 @@ class ClassifierDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.sequences[idx]
-
-class ChunkedDataset(Dataset):
-    """Dataset that loads chunked .pt files from a directory."""
-    def __init__(self, data_dir):
-        self.data_dir = Path(data_dir)
-        self.chunks = []
-        self.chunk_indices = []
-        chunk_files = sorted(self.data_dir.glob("chunk_*.pt"))
-        print(f"Loading {len(chunk_files)} chunks from {data_dir}")
-        global_idx = 0
-        for chunk_file in chunk_files:
-            chunk_data = torch.load(chunk_file, weights_only=False)
-            chunk_size = len(chunk_data["ids"])
-            self.chunks.append(chunk_data)
-            for i in range(chunk_size):
-                self.chunk_indices.append((len(self.chunks) - 1, i, global_idx))
-                global_idx += 1
-        print(f"Total samples: {len(self.chunk_indices)}")
-    def __len__(self):
-        return len(self.chunk_indices)
-    def __getitem__(self, idx):
-        chunk_idx, local_idx, global_idx = self.chunk_indices[idx]
-        chunk = self.chunks[chunk_idx]
-        embedding = chunk["X"][local_idx]
-        label = chunk["y"][local_idx]
-        return embedding, label
 
 
 class CNNClassifierModel(nn.Module):
@@ -80,7 +50,6 @@ class CNNClassifierModel(nn.Module):
         num_layers: int = 4,  # 残差块堆叠次数
         dropout: float = 0.3,
         seq_len: int = 512,  # 仅在内部计算位置编码用，可覆盖
-        num_classes: int = 1,
     ):
         super().__init__()
 
@@ -88,16 +57,12 @@ class CNNClassifierModel(nn.Module):
         self.ffn_dim = ffn_dim
         self.num_layers = num_layers
         self.seq_len = seq_len
-        self.num_classes = num_classes
 
-        # Project aggregated features to pseudo-sequence
-        self.feature_proj = nn.Linear(input_dim, seq_len * ffn_dim)
-        
-        # Position encoding
-        self.pos_embed = nn.Parameter(torch.randn(1, seq_len, ffn_dim) * 0.02)
+        # 1. 位置编码（可选，但通常有帮助）
+        self.pos_embed = nn.Parameter(torch.randn(1, seq_len, input_dim) * 0.02)
 
         # 2. 入口 1×1 升维
-        self.input_proj = nn.Conv1d(ffn_dim, ffn_dim, kernel_size=1)
+        self.input_proj = nn.Conv1d(input_dim, ffn_dim, kernel_size=1)
 
         # 3. 堆叠残差块
         self.blocks = nn.ModuleList(
@@ -113,7 +78,7 @@ class CNNClassifierModel(nn.Module):
             nn.Linear(ffn_dim, ffn_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_dim // 2, num_classes),
+            nn.Linear(ffn_dim // 2, 7),
         )
 
         self._init_weights()
@@ -127,27 +92,26 @@ class CNNClassifierModel(nn.Module):
 
     def forward(self, x, mask=None):
         """
-        x: (B, D) aggregated features
-        mask: not used for 2D input
+        x: (B, L, D)
+        mask: (B, L)  0=pad  1=valid  用于后续改进，此处先忽略
         """
-        B, D = x.size()
-        # Project to pseudo-sequence: (B, D) -> (B, seq_len, ffn_dim)
-        x = self.feature_proj(x)
-        
-        x = x.reshape(B, self.seq_len, self.ffn_dim)
-        x = x.contiguous()  # Ensure memory is contiguous for transpose
+        B, L, D = x.size()
+        # 统一处理：先截断到最大允许长度，然后填充到固定长度
+        x = x[:, : self.seq_len, :]  # 截断超长部分
+        pad_len = self.seq_len - x.size(1)  # 计算需要填充的长度
+        # 在序列维度(第1维)右侧填充，特征维度(第2维)不填充
+        x = F.pad(x, (0, 0, 0, pad_len))  # (B, self.seq_len, D)
 
         x = x + self.pos_embed  # 加位置编码
-        x = x.transpose(1, 2)  # (B, ffn_dim, seq_len)
+        x = x.transpose(1, 2)  # (B, D, L)
 
-        x = x.contiguous()  # Ensure memory contiguous for Conv1d
-        x = self.input_proj(x)
+        x = self.input_proj(x)  # (B, ffn_dim, L)
 
         for block in self.blocks:
             x = block(x)
 
         x = self.pool(x).squeeze(-1)  # (B, ffn_dim)
-        logits = self.classifier(x)  # (B, 1)
+        logits = self.classifier(x)  # (B, 6)
         return logits
 
 
@@ -217,10 +181,9 @@ def plot_metrics(
     num_epochs,
     train_losses,
     valid_losses,
-    train_accs,
-    valid_accs,
+    train_accs,  # 新增参数
+    valid_accs,  # 新增参数
     output_dir,
-    class_names=None,
 ):
     # 创建输出目录
     output_dir = Path(output_dir)
@@ -259,8 +222,10 @@ def plot_metrics(
 
     # 3. 新增：绘制整体准确率曲线
     if train_accs and valid_accs:
-        overall_train_acc = [float(np.mean(np.atleast_1d(acc))) for acc in train_accs]
-        overall_valid_acc = [float(np.mean(np.atleast_1d(acc))) for acc in valid_accs]
+        # 计算整体准确率（宏平均）
+        overall_train_acc = [sum(acc) / len(acc) for acc in train_accs]
+        overall_valid_acc = [sum(acc) / len(acc) for acc in valid_accs]
+
         plt.figure(figsize=(10, 5))
         plt.plot(range(1, num_epochs + 1), overall_train_acc, label="Train Accuracy")
         plt.plot(
@@ -286,32 +251,24 @@ def plot_metrics(
 
     # 新增：保存准确率数据
     if train_accs:
-        train_arr = np.array(train_accs, dtype=float)
-        if train_arr.ndim == 1:
-            train_arr = train_arr.reshape(-1, 1)
-        header = ",".join(class_names) if class_names and len(class_names) == train_arr.shape[1] else ",".join([f"Class{i}" for i in range(train_arr.shape[1])])
         np.savetxt(
             data_dir / "train_accs",
-            train_arr,
+            np.array(train_accs),
             delimiter=",",
-            header=header,
+            header="Class0,Class1,Class2,Class3,Class4,Class5",
             comments="",
         )
     if valid_accs:
-        valid_arr = np.array(valid_accs, dtype=float)
-        if valid_arr.ndim == 1:
-            valid_arr = valid_arr.reshape(-1, 1)
-        header = ",".join(class_names) if class_names and len(class_names) == valid_arr.shape[1] else ",".join([f"Class{i}" for i in range(valid_arr.shape[1])])
         np.savetxt(
             data_dir / "valid_accs",
-            valid_arr,
+            np.array(valid_accs),
             delimiter=",",
-            header=header,
+            header="Class0,Class1,Class2,Class3,Class4,Class5",
             comments="",
         )
 
 
-def plot_accs(train_accs, valid_accs, current_epoch, output_dir, class_names=None):
+def plot_accs(train_accs, valid_accs, current_epoch, output_dir):
     """绘制每个类别的训练和验证准确率曲线"""
     if not train_accs or not valid_accs:
         return
@@ -320,15 +277,8 @@ def plot_accs(train_accs, valid_accs, current_epoch, output_dir, class_names=Non
     output_dir.mkdir(parents=True, exist_ok=True)
     fig_accs_path = output_dir / "accs_plot.png"
 
-    train_arr = np.array(train_accs, dtype=float)
-    valid_arr = np.array(valid_accs, dtype=float)
-    if train_arr.ndim == 1:
-        train_arr = train_arr.reshape(-1, 1)
-    if valid_arr.ndim == 1:
-        valid_arr = valid_arr.reshape(-1, 1)
-
     num_epochs = current_epoch
-    num_classes = int(train_arr.shape[1])
+    num_classes = len(train_accs[0])
     epochs_range = range(1, num_epochs + 1)
 
     # 设置颜色和线型
@@ -337,10 +287,23 @@ def plot_accs(train_accs, valid_accs, current_epoch, output_dir, class_names=Non
 
     plt.figure(figsize=(12, 8))
 
+    # 绘制每个类别的曲线
     for i in range(num_classes):
-        class_name = class_names[i] if class_names and i < len(class_names) else f"Class{i}"
-        plt.plot(epochs_range, train_arr[:, i], color=colors[i], linestyle=line_styles[0], label=f"Train {class_name}")
-        plt.plot(epochs_range, valid_arr[:, i], color=colors[i], linestyle=line_styles[1], label=f"Valid {class_name}")
+        # 训练准确率（实线）
+        plt.plot(
+            epochs_range,
+            [acc[i] for acc in train_accs],
+            color=colors[i],
+            linestyle=line_styles[0],
+        )
+
+        # 验证准确率（虚线）
+        plt.plot(
+            epochs_range,
+            [acc[i] for acc in valid_accs],
+            color=colors[i],
+            linestyle=line_styles[1],
+        )
 
     plt.xlabel("Epochs")
     plt.ylabel("Accuracy")
@@ -348,38 +311,30 @@ def plot_accs(train_accs, valid_accs, current_epoch, output_dir, class_names=Non
     plt.ylim(0, 1.0)
     plt.grid(True)
 
-    plt.legend(loc="best", ncol=2)
-    plt.savefig(fig_accs_path)
+    # 优化图例显示 - 使用代理对象
+    from matplotlib.lines import Line2D
+
+    legend_elements = []
+
+    # 添加类别颜色图例
+    for i in range(num_classes):
+        legend_elements.append(
+            Line2D([0], [0], color=colors[i], lw=2, label=f"Class {i}")
+        )
+
+    # 添加线型图例
+    legend_elements.append(
+        Line2D([0], [0], color="black", linestyle="-", lw=2, label="Train")
+    )
+    legend_elements.append(
+        Line2D([0], [0], color="black", linestyle="--", lw=2, label="Validation")
+    )
+
+    plt.legend(handles=legend_elements, loc="center left", bbox_to_anchor=(1, 0.5))
+
+    plt.tight_layout()
+    plt.savefig(fig_accs_path, bbox_inches="tight")
     plt.close()
-
-
-def infer_num_classes_from_loader(train_loader):
-    sample_label = train_loader.dataset[0][1]
-    return 1 if sample_label.ndim == 0 else int(sample_label.shape[-1])
-
-
-def load_class_names(train_dataset_path, num_classes):
-    train_dataset_path = Path(train_dataset_path)
-    candidates = []
-    if train_dataset_path.is_dir():
-        candidates.append(train_dataset_path.parent / "metadata.json")
-    else:
-        candidates.append(train_dataset_path.parent / "metadata.json")
-    for meta_path in candidates:
-        if not meta_path.exists():
-            continue
-        with meta_path.open("r", encoding="utf-8") as f:
-            meta = json.load(f)
-        classes = meta.get("classes")
-        if isinstance(classes, list) and len(classes) == num_classes:
-            return classes
-    if num_classes == 1:
-        return ["positive"]
-    return [f"Class{i}" for i in range(num_classes)]
-
-
-def format_targets(y):
-    return y.unsqueeze(-1).float() if y.ndim == 1 else y.float()
 
 
 def parse_args():
@@ -397,43 +352,22 @@ def parse_args():
         default="./output",
         help="Output directory for results",
     )
-    parser.add_argument(
-        "--data_parallel",
-        action="store_true",
-        help="Enable DataParallel when multiple GPUs are visible",
-    )
     return parser.parse_args()
 
 
 def collate_fn(batch):
-    """Collate function for 2D features and scalar labels."""
     embeddings, labels = zip(*batch)
-    # Stack 2D features: list of (D,) tensors -> (B, D)
-    embeddings = torch.stack(embeddings, dim=0)
-    # Stack scalar labels: list of () tensors -> (B,)
-    labels = torch.stack(labels, dim=0)
-    # No mask needed for 2D features
-    return embeddings, labels, None
+    padded_embs = pad_sequence(embeddings, batch_first=True, padding_value=0)
+    labels = pad_sequence(labels, batch_first=True, padding_value=0)
+    mask = (padded_embs.sum(dim=-1) != 0).float()
+    return padded_embs, labels, mask
 
 
 def load_data(train_path, valid_path, batch_size):
-    """Load data from single .pt file or chunked directory."""
     print("Loading datasets...")
     start_time = time.time()
-    train_path = Path(train_path)
-    valid_path = Path(valid_path)
-    if train_path.is_dir():
-        print("Loading chunked training data...")
-        train_dataset = ChunkedDataset(train_path)
-    else:
-        print("Loading single training file...")
-        train_dataset = torch.load(train_path, weights_only=False)
-    if valid_path.is_dir():
-        print("Loading chunked validation data...")
-        valid_dataset = ChunkedDataset(valid_path)
-    else:
-        print("Loading single validation file...")
-        valid_dataset = torch.load(valid_path, weights_only=False)
+    train_dataset = torch.load(train_path, weights_only=False)
+    valid_dataset = torch.load(valid_path, weights_only=False)
     print("Datasets loaded successfully.")
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(valid_dataset)}")
@@ -447,7 +381,7 @@ def load_data(train_path, valid_path, batch_size):
     return train_loader, valid_loader
 
 
-def train(config, train_dataset_path, valid_dataset_path, output_dir, data_parallel=False):
+def train(config, train_dataset_path, valid_dataset_path, output_dir):
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     print("pid: ", os.getpid())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -460,8 +394,6 @@ def train(config, train_dataset_path, valid_dataset_path, output_dir, data_paral
     train_loader, valid_loader = load_data(
         train_dataset_path, valid_dataset_path, config["training"]["batch_size"]
     )
-    num_classes = infer_num_classes_from_loader(train_loader)
-    class_names = load_class_names(train_dataset_path, num_classes)
 
     model_config = config["model"]
     model = CNNClassifierModel(
@@ -471,10 +403,9 @@ def train(config, train_dataset_path, valid_dataset_path, output_dir, data_paral
         num_layers=model_config["num_layers"],
         dropout=model_config["dropout"],
         seq_len=model_config["seq_len"],
-        num_classes=num_classes,
     ).to(device)
 
-    if data_parallel and torch.cuda.device_count() > 1:
+    if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs for training.")
         model = nn.DataParallel(model)
     model = model.to(device)
@@ -490,26 +421,23 @@ def train(config, train_dataset_path, valid_dataset_path, output_dir, data_paral
     train_accs = []
     valid_accs = []
     threshold = 0.5
-    (output_dir / "classes.json").write_text(json.dumps(class_names, ensure_ascii=False, indent=2), encoding="utf-8")
 
     for epoch in range(train_config["num_epochs"]):
-        print(epoch)
         model.train()
         train_loss = 0.0
         train_samples = 0
-        train_correct = np.zeros(num_classes, dtype=np.float64)
+        train_correct = [0] * 7
         start_time = time.time()
         for X, y, mask in train_loader:
             X, y, mask = (
                 X.to(device).float(),
                 y.to(device).float(),
-                mask if mask is None else mask.to(device).bool(),
+                mask.to(device).bool(),
             )
             optimizer.zero_grad()
             outputs = model(X, mask)
-            loss = F.binary_cross_entropy_with_logits(outputs, format_targets(y))
+            loss = F.binary_cross_entropy_with_logits(outputs, y.float())
             loss.backward()
-            # time.sleep(1)
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), train_config["clip_grad"]
             )
@@ -517,52 +445,49 @@ def train(config, train_dataset_path, valid_dataset_path, output_dir, data_paral
 
             train_loss += loss.item() * X.shape[0]
             train_samples += X.shape[0]
-
             with torch.no_grad():
                 probs = torch.sigmoid(outputs)
                 preds = (probs > threshold).float()
-                targets = format_targets(y)
-                corrects = (preds == targets).float()
-                train_correct += corrects.sum(dim=0).detach().cpu().numpy()
-        train_epoch_acc = (train_correct / train_samples).tolist()
-        display_train_acc = train_epoch_acc[0] if num_classes == 1 else train_epoch_acc
+                corrects = (preds == y).float()
+                for i in range(7):
+                    train_correct[i] += corrects[:, i].sum().item()
+        train_epoch_acc = [train_correct[i] / train_samples for i in range(7)]
         train_accs.append(train_epoch_acc)
         print(
             f"Epoch {epoch + 1}/{train_config['num_epochs']}, "
             f"Train Loss: {train_loss / train_samples:.4f}, "
             f"Time: {time.time() - start_time:.2f}s\n"
-            f"Train Acc: {display_train_acc}\n"
+            f"Train Acc: {train_epoch_acc}\n"
             f"Train correct: {train_correct}"
         )
         start_time = time.time()
         model.eval()
         valid_loss = 0.0
         valid_samples = 0
-        valid_correct = np.zeros(num_classes, dtype=np.float64)
+        valid_correct = [0] * 7
         with torch.no_grad():
             for X, y, mask in valid_loader:
                 X, y, mask = (
                     X.to(device).float(),
                     y.to(device).float(),
-                    mask if mask is None else mask.to(device).bool(),
+                    mask.to(device).bool(),
                 )
                 outputs = model(X, mask)
-                loss = F.binary_cross_entropy_with_logits(outputs, format_targets(y))
+                loss = F.binary_cross_entropy_with_logits(outputs, y.float())
                 valid_loss += loss.item() * X.shape[0]
                 valid_samples += X.shape[0]
                 probs = torch.sigmoid(outputs)
                 preds = (probs > threshold).float()
-                targets = format_targets(y)
-                corrects = (preds == targets).float()
-                valid_correct += corrects.sum(dim=0).detach().cpu().numpy()
+                corrects = (preds == y).float()
+                for i in range(7):
+                    valid_correct[i] += corrects[:, i].sum().item()
 
-        valid_epoch_acc = (valid_correct / valid_samples).tolist()
-        display_valid_acc = valid_epoch_acc[0] if num_classes == 1 else valid_epoch_acc
+        valid_epoch_acc = [valid_correct[i] / valid_samples for i in range(7)]
         valid_accs.append(valid_epoch_acc)
         print(
             f"Validation Loss: {valid_loss / valid_samples:.4f}, "
             f"Time: {time.time() - start_time:.2f}s\n"
-            f"Valid Acc: {display_valid_acc}"
+            f"Valid Acc: {valid_epoch_acc}"
         )
         avg_train_loss = train_loss / train_samples
         avg_valid_loss = valid_loss / valid_samples
@@ -575,9 +500,9 @@ def train(config, train_dataset_path, valid_dataset_path, output_dir, data_paral
             output_dir / f"model_epoch_{epoch + 1}.pt",
         )
         plot_metrics(
-            epoch + 1, train_losses, valid_losses, train_accs, valid_accs, output_dir, class_names
+            epoch + 1, train_losses, valid_losses, train_accs, valid_accs, output_dir
         )
-        plot_accs(train_accs, valid_accs, epoch + 1, output_dir, class_names)
+        plot_accs(train_accs, valid_accs, epoch + 1, output_dir)
 
 
 if __name__ == "__main__":
@@ -586,7 +511,7 @@ if __name__ == "__main__":
         config = json.load(f)
     print("Current configuration:")
     print(json.dumps(config, indent=4))
-    current_dir = Path.cwd()
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
 
     train_dataset_path = (
         Path(args.train_dataset)
@@ -604,4 +529,4 @@ if __name__ == "__main__":
         else current_dir / args.output_dir
     )
 
-    train(config, train_dataset_path, valid_dataset_path, output_dir, data_parallel=args.data_parallel)
+    train(config, train_dataset_path, valid_dataset_path, output_dir)

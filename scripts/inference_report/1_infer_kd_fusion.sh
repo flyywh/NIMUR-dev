@@ -5,7 +5,7 @@ ENV_NAME="${ENV_NAME:-evo2}"
 GPUS=""
 
 KD_OUT_ROOT="results_tune/kd_fusion"
-FEATURES="tmp/kd_fusion/kd_fusion_dataset.pt"
+FEATURES="data/kd_fusion/kd_dataset.pt"
 SPLIT="test"
 MODEL=""
 OUT=""
@@ -18,7 +18,7 @@ Options:
   --env ENV
   --gpus 0,1
   --kd-out-root DIR      Root with KD tuning runs (default: results_tune/kd_fusion)
-  --features PATH        KD fused dataset .pt (default: tmp/kd_fusion/kd_fusion_dataset.pt)
+  --features PATH        KD fused dataset .pt (default: data/kd_fusion/kd_dataset.pt)
   --split train|val|test (default: test)
   --model PATH           Optional: explicit kd_best.pt path
   --out PATH             Optional: output csv path
@@ -65,7 +65,12 @@ root = Path(sys.argv[1])
 best_model = None
 best_auc = -1.0
 
-for metrics in root.glob('run*/metrics.json'):
+metrics_candidates = []
+if (root / 'metrics.json').exists():
+    metrics_candidates.append(root / 'metrics.json')
+metrics_candidates.extend(sorted(root.glob('run*/metrics.json')))
+
+for metrics in metrics_candidates:
     run_dir = metrics.parent
     model = run_dir / 'models' / 'kd_best.pt'
     if not model.exists():
@@ -80,7 +85,10 @@ for metrics in root.glob('run*/metrics.json'):
         best_model = model
 
 if best_model is None:
-    cand = sorted(root.glob('run*/models/kd_best.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
+    cand = []
+    if (root / 'models' / 'kd_best.pt').exists():
+        cand.append(root / 'models' / 'kd_best.pt')
+    cand.extend(sorted(root.glob('run*/models/kd_best.pt'), key=lambda p: p.stat().st_mtime, reverse=True))
     if cand:
         best_model = cand[0]
 

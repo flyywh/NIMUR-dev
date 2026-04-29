@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 class TeacherNet(nn.Module):
-    def __init__(self, in_dim: int, hidden: int, dropout: float):
+    def __init__(self, in_dim: int, hidden: int, dropout: float, out_dim: int = 1):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden),
@@ -22,25 +22,27 @@ class TeacherNet(nn.Module):
             nn.Linear(hidden, hidden // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden // 2, 1),
+            nn.Linear(hidden // 2, out_dim),
         )
 
     def forward(self, x):
-        return self.net(x).squeeze(-1)
+        out = self.net(x)
+        return out.squeeze(-1) if out.shape[-1] == 1 else out
 
 
 class StudentNet(nn.Module):
-    def __init__(self, in_dim: int, hidden: int, dropout: float):
+    def __init__(self, in_dim: int, hidden: int, dropout: float, out_dim: int = 1):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden, 1),
+            nn.Linear(hidden, out_dim),
         )
 
     def forward(self, x):
-        return self.net(x).squeeze(-1)
+        out = self.net(x)
+        return out.squeeze(-1) if out.shape[-1] == 1 else out
 
 
 def set_seed(seed: int):
@@ -51,17 +53,53 @@ def set_seed(seed: int):
 
 
 def metrics_from_logits(y_true: np.ndarray, logits: np.ndarray):
+    y_true = np.asarray(y_true)
+    logits = np.asarray(logits)
     probs = 1 / (1 + np.exp(-logits))
-    try:
-        auc = float(roc_auc_score(y_true, probs))
-    except Exception:
-        auc = 0.0
-    try:
-        auprc = float(average_precision_score(y_true, probs))
-    except Exception:
-        auprc = 0.0
-    acc = float(((probs >= 0.5) == y_true).mean())
-    return {"auc": auc, "auprc": auprc, "acc": acc}
+    if y_true.ndim == 1 or (y_true.ndim == 2 and y_true.shape[1] == 1):
+        y_true = y_true.reshape(-1)
+        probs = probs.reshape(-1)
+        try:
+            auc = float(roc_auc_score(y_true, probs))
+        except Exception:
+            auc = 0.0
+        try:
+            auprc = float(average_precision_score(y_true, probs))
+        except Exception:
+            auprc = 0.0
+        acc = float(((probs >= 0.5) == y_true).mean())
+        return {"auc": auc, "auprc": auprc, "acc": acc, "num_labels": 1}
+
+    preds = (probs >= 0.5).astype(np.int64)
+    y_true = y_true.astype(np.int64)
+    per_class_auc = []
+    per_class_auprc = []
+    per_class_acc = []
+    for class_idx in range(y_true.shape[1]):
+        class_true = y_true[:, class_idx]
+        class_prob = probs[:, class_idx]
+        class_pred = preds[:, class_idx]
+        per_class_acc.append(float((class_pred == class_true).mean()))
+        try:
+            score = float(roc_auc_score(class_true, class_prob))
+            if np.isfinite(score):
+                per_class_auc.append(score)
+        except Exception:
+            pass
+        try:
+            score = float(average_precision_score(class_true, class_prob))
+            if np.isfinite(score):
+                per_class_auprc.append(score)
+        except Exception:
+            pass
+
+    return {
+        "auc_macro": float(np.mean(per_class_auc)) if per_class_auc else 0.0,
+        "auprc_macro": float(np.mean(per_class_auprc)) if per_class_auprc else 0.0,
+        "acc": float(np.mean(per_class_acc)) if per_class_acc else 0.0,
+        "exact_match": float((preds == y_true).all(axis=1).mean()) if len(y_true) else 0.0,
+        "num_labels": int(y_true.shape[1]),
+    }
 
 
 def run_eval(student, loader, device):
@@ -97,10 +135,14 @@ def main():
     Xtr, ytr = obj["train"]["X"], obj["train"]["y"]
     Xva, yva = obj["val"]["X"], obj["val"]["y"]
     Xte, yte = obj["test"]["X"], obj["test"]["y"]
+    classes = None
+    if isinstance(obj.get("meta"), dict):
+        classes = obj["meta"].get("classes")
 
     in_dim = Xtr.shape[1]
-    teacher = TeacherNet(in_dim, int(mcfg["teacher_hidden"]), float(mcfg["dropout"]))
-    student = StudentNet(in_dim, int(mcfg["student_hidden"]), float(mcfg["dropout"]))
+    num_labels = 1 if ytr.ndim == 1 else int(ytr.shape[1])
+    teacher = TeacherNet(in_dim, int(mcfg["teacher_hidden"]), float(mcfg["dropout"]), out_dim=num_labels)
+    student = StudentNet(in_dim, int(mcfg["student_hidden"]), float(mcfg["dropout"]), out_dim=num_labels)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     teacher = teacher.to(device)
@@ -163,13 +205,18 @@ def main():
         history.append(row)
         print(json.dumps(row, ensure_ascii=False))
 
-        if val_m["auc"] > best_auc:
-            best_auc = val_m["auc"]
+        val_score = float(val_m.get("auc_macro", val_m.get("auc", 0.0)))
+        if not np.isfinite(val_score):
+            val_score = float(val_m.get("auprc_macro", val_m.get("auprc", -1.0)))
+        if val_score > best_auc:
+            best_auc = val_score
             torch.save(
                 {
                     "student_state": student.state_dict(),
                     "teacher_state": teacher.state_dict(),
                     "feature_dim": int(in_dim),
+                    "num_labels": int(num_labels),
+                    "classes": classes,
                     "config": cfg,
                     "best_val": val_m,
                 },
@@ -187,9 +234,17 @@ def main():
 
     probs = 1 / (1 + np.exp(-lg))
     with (outdir / "test_predictions.csv").open("w", encoding="utf-8") as f:
-        f.write("seq_id,label,prediction\n")
-        for sid, yy, pp in zip(obj["test"]["ids"], y.astype(int), probs):
-            f.write(f"{sid},{yy},{pp:.6f}\n")
+        if num_labels == 1:
+            f.write("seq_id,label,prediction\n")
+            for sid, yy, pp in zip(obj["test"]["ids"], y.astype(int), probs):
+                f.write(f"{sid},{yy},{pp:.6f}\n")
+        else:
+            class_names = classes if isinstance(classes, list) and len(classes) == num_labels else [f"class_{idx}" for idx in range(num_labels)]
+            header = ["seq_id"] + [f"label_{name}" for name in class_names] + [f"pred_{name}" for name in class_names]
+            f.write(",".join(header) + "\n")
+            for sid, yy, pp in zip(obj["test"]["ids"], y.astype(int), probs):
+                row = [sid] + [str(int(v)) for v in yy.tolist()] + [f"{float(v):.6f}" for v in pp.tolist()]
+                f.write(",".join(row) + "\n")
 
     print(f"[KD] done: {outdir}")
 

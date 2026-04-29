@@ -1,0 +1,40 @@
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+
+# Logs
+*.log
+
+# Data / assets / outputs
+/data
+/data/
+/data_ar
+/data_ar/
+/local_assets
+/local_assets/
+/output
+/output/
+/results_tune
+/results_tune/
+/temp
+/temp/
+/test_real
+/test_real/
+
+# Model / tensor artifacts
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+*.npy
+*.npz
+
+# Frontend / misc
+/node_modules/
+.DS_Store
+.vscode/
+.idea/

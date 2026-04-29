@@ -9,8 +9,10 @@ MODEL=""
 FASTA=""
 OUT=""
 PROTBERT="local_assets/data/ProtBERT/ProtBERT"
-EVO_LAYER="blocks.21.mlp.l3"
-EVO_MAX_LEN="16384"
+ESM_DIM="1280"
+PROT_DIM="1024"
+ESM_CHUNK_LEN="1022"
+PROTBERT_MAX_LEN="1024"
 
 usage() {
   cat <<USAGE
@@ -24,8 +26,10 @@ Options:
   --model PATH            Optional explicit kd_best.pt
   --out PATH              Optional output csv
   --protbert PATH         ProtBERT dir
-  --evo-layer NAME        Evo2 layer name (default: blocks.21.mlp.l3)
-  --evo-max-len N         Evo2 input max length (default: 16384)
+  --esm-dim N             ESM2 feature dim (default: 1280)
+  --prot-dim N            ProtBERT feature dim (default: 1024)
+  --esm-chunk-len N       ESM2 chunk len (default: 1022)
+  --protbert-max-len N    ProtBERT max len (default: 1024)
 
 Model selection:
   If --model is not set, auto-select run with highest metrics.json best_val_auc.
@@ -41,8 +45,10 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --protbert) PROTBERT="$2"; shift 2 ;;
-    --evo-layer) EVO_LAYER="$2"; shift 2 ;;
-    --evo-max-len) EVO_MAX_LEN="$2"; shift 2 ;;
+    --esm-dim) ESM_DIM="$2"; shift 2 ;;
+    --prot-dim) PROT_DIM="$2"; shift 2 ;;
+    --esm-chunk-len) ESM_CHUNK_LEN="$2"; shift 2 ;;
+    --protbert-max-len) PROTBERT_MAX_LEN="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1"; usage; exit 1 ;;
   esac
@@ -72,7 +78,12 @@ from pathlib import Path
 root = Path(sys.argv[1])
 best_model = None
 best_auc = -1.0
-for metrics in root.glob('run*/metrics.json'):
+metrics_candidates = []
+if (root / 'metrics.json').exists():
+    metrics_candidates.append(root / 'metrics.json')
+metrics_candidates.extend(sorted(root.glob('run*/metrics.json')))
+
+for metrics in metrics_candidates:
     m = metrics.parent / 'models' / 'kd_best.pt'
     if not m.exists():
         continue
@@ -85,7 +96,10 @@ for metrics in root.glob('run*/metrics.json'):
         best_model = m
 
 if best_model is None:
-    cand = sorted(root.glob('run*/models/kd_best.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
+    cand = []
+    if (root / 'models' / 'kd_best.pt').exists():
+        cand.append(root / 'models' / 'kd_best.pt')
+    cand.extend(sorted(root.glob('run*/models/kd_best.pt'), key=lambda p: p.stat().st_mtime, reverse=True))
     if cand:
         best_model = cand[0]
 
@@ -112,8 +126,10 @@ conda run -n "$ENV_NAME" python predict/kd_fusion_predict_fasta.py \
   --model "$MODEL" \
   --fasta "$FASTA" \
   --protbert "$PROTBERT" \
-  --evo-layer "$EVO_LAYER" \
-  --evo-max-len "$EVO_MAX_LEN" \
+  --esm-dim "$ESM_DIM" \
+  --prot-dim "$PROT_DIM" \
+  --esm-chunk-len "$ESM_CHUNK_LEN" \
+  --protbert-max-len "$PROTBERT_MAX_LEN" \
   --out "$OUT"
 
 echo "[KD-FASTA-INFER] done: $OUT"
